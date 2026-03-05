@@ -12,10 +12,8 @@ from qrshilde.src.ml.url_model import predict_url, model_exists
 from qrshilde.src.ai.report_generator import build_markdown_report
 
 # -----------------------------
-# Config
+# Config (Rules + ML ONLY)
 # -----------------------------
-DEFAULT_THRESHOLD = float(os.getenv("URL_MAL_THRESHOLD", "0.60"))
-
 ALLOWLIST_DOMAINS = {
     "google.com",
     "github.com",
@@ -36,12 +34,11 @@ SHORTENERS = {
     "ow.ly", "rebrand.ly", "lnk.bio", "shorturl.at"
 }
 
-BRANDS = ["paypal", "google", "microsoft", "apple", "netflix", "binance"]
-
 LURE_WORDS = [
     "login", "verify", "update", "secure", "account", "password", "otp", "bank",
     "confirm", "billing", "invoice", "pay", "wallet", "support"
 ]
+
 
 # -----------------------------
 # Helpers
@@ -79,13 +76,13 @@ def _dns_resolves(domain: str) -> bool:
         return False
 
 
-def _count_dashes(domain: str) -> int:
-    return domain.count("-") if domain else 0
-
-
 def _url_is_http(url: str) -> bool:
     u = (url or "").strip().lower()
     return u.startswith("http://")
+
+
+def _looks_like_ip(url: str) -> bool:
+    return bool(re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", url or ""))
 
 
 def _lure_hits(text: str) -> list[str]:
@@ -98,6 +95,15 @@ def _extract_url_from_vcard(payload: str) -> str | None:
     if m:
         return m.group(1).strip()
     m2 = re.search(r"(https?://[^\s]+)", payload or "", flags=re.IGNORECASE)
+    return m2.group(1).strip() if m2 else None
+
+
+def _extract_first_url_anywhere(payload: str) -> str | None:
+    m = re.search(r"(https?://[^\s]+)", payload or "", flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # also allow www.*
+    m2 = re.search(r"\b(www\.[^\s]+)", payload or "", flags=re.IGNORECASE)
     return m2.group(1).strip() if m2 else None
 
 
@@ -152,7 +158,7 @@ def _verdict_band(score: int) -> str:
 
 
 # -----------------------------
-# Main Analyzer (RULES + ML only)
+# Main Analyzer (RULES + ML ONLY)
 # -----------------------------
 async def analyze_qr_payload(payload: str, report_id: str | None = None) -> dict:
     payload = (payload or "").strip()
@@ -164,11 +170,11 @@ async def analyze_qr_payload(payload: str, report_id: str | None = None) -> dict
     if not report_id or not str(report_id).strip():
         report_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
 
-    # 0) Detect type
+    # 0) Type
     ptype = detect_payload_type(payload)
     findings.append(f"Payload type: {ptype}")
 
-    # 1) General Pattern Scan
+    # 1) General Pattern Scan (regex rules)
     pattern_issues = scan_for_patterns(payload)
     if pattern_issues:
         findings.extend(pattern_issues)
@@ -177,14 +183,15 @@ async def analyze_qr_payload(payload: str, report_id: str | None = None) -> dict
         benign.append("No obvious injection patterns found (basic regex scan).")
 
     # 2) Payload-specific rules
-    payload_for_url = None
-    ptype_for_url = None
+    extracted_url: str | None = None
 
     if ptype == "wifi":
         wifi_issues = detect_wifi_threats(payload)
         if wifi_issues:
             findings.extend(wifi_issues)
             risk_score += 40
+        else:
+            benign.append("Wi-Fi payload: no obvious Wi-Fi misconfig threats detected.")
 
     elif ptype == "sms":
         sms_issues = _sms_threats(payload)
@@ -205,130 +212,119 @@ async def analyze_qr_payload(payload: str, report_id: str | None = None) -> dict
             risk_score += 25
 
     elif ptype == "vcard":
-        vcard_issues = _vcard_threats(payload)
-        if vcard_issues:
-            findings.extend(vcard_issues)
+        v_issues = _vcard_threats(payload)
+        if v_issues:
+            findings.extend(v_issues)
             risk_score += 20
+        extracted_url = _extract_url_from_vcard(payload)
 
-        embedded_url = _extract_url_from_vcard(payload)
-        if embedded_url:
-            findings.append("VCARD: embedded URL extracted for analysis.")
-            payload_for_url = embedded_url
-            ptype_for_url = "url"
+    elif ptype == "url":
+        extracted_url = payload
 
-    elif ptype == "deeplink":
-        findings.append("Deep link QR: May open apps directly (higher risk if unexpected).")
-        risk_score += 20
-
-    # 3) URL heuristics (for URL payload OR embedded URL in vcard)
-    url_target = payload if ptype == "url" else payload_for_url
-
-    domain = None
-    is_allowlisted = False
-    is_reserved = False
-    is_shortener = False
-    dns_ok = True
-
-    if url_target and (ptype == "url" or ptype_for_url == "url"):
-        domain = _get_domain(url_target)
-
-        if domain:
-            if _domain_in_set(domain, ALLOWLIST_DOMAINS):
-                is_allowlisted = True
-                benign.append(f"Allowlist: trusted/known domain detected ({domain})")
-
-            if _domain_in_set(domain, RESERVED_DOMAINS):
-                is_reserved = True
-                benign.append(f"Reserved/documentation domain: {domain} (lower concern)")
-
-            if _domain_in_set(domain, SHORTENERS):
-                is_shortener = True
-                findings.append(f"URL Heuristic: shortener detected ({domain})")
-                risk_score += 25
-
-            for brand in BRANDS:
-                if brand in domain and not domain.endswith(f"{brand}.com"):
-                    findings.append(f"URL Heuristic: brand-in-domain impersonation ({brand})")
-                    risk_score += 35
-                    break
-
-            if _count_dashes(domain) >= 2:
-                findings.append("URL Heuristic: excessive dashes in domain")
-                risk_score += 10
-
-            if (not is_allowlisted) and (not is_reserved) and (not _dns_resolves(domain)):
-                dns_ok = False
-                findings.append("URL Heuristic: domain does not resolve (NXDOMAIN/DNS failure)")
-                risk_score += 25
-            else:
-                benign.append("DNS resolves (basic check) or domain is allowlisted/reserved.")
-
-        if _url_is_http(url_target):
-            findings.append("URL Heuristic: HTTP without TLS")
-            risk_score += 10
-        else:
-            benign.append("HTTPS detected (or non-http scheme).")
-
-        hits = _lure_hits(url_target)
-        if hits:
-            if is_allowlisted or is_reserved:
-                benign.append("Lure-like words exist but domain is allowlisted/reserved (reduced concern).")
-            else:
-                findings.append(f"URL Heuristic: lure keywords present ({', '.join(hits[:6])})")
-                risk_score += 10
-
-    # 4) ML model (URL only) — with safety override for allowlist/reserved
-    ml_result = None
-    if url_target and (ptype == "url" or ptype_for_url == "url") and model_exists():
-        try:
-            ml_result = predict_url(url_target)
-            p = float(ml_result.get("phishing_probability", 0.0))
-            thr = float(ml_result.get("threshold", DEFAULT_THRESHOLD))
-
-            if is_reserved:
-                benign.append(f"ML: probability={p:.2f} but domain is reserved; ML not used to escalate.")
-            elif is_allowlisted:
-                benign.append(f"ML: probability={p:.2f} but domain is allowlisted; ML not used to escalate.")
-            else:
-                if p >= thr:
-                    findings.append(f"ML: suspicious probability={p:.2f} (>= {thr:.2f})")
-                    risk_score += 35
-                    if is_shortener:
-                        risk_score += 10
-                else:
-                    benign.append(f"ML: probability={p:.2f} (< {thr:.2f})")
-        except Exception as e:
-            findings.append(f"ML: model error: {e}")
     else:
-        if url_target and (ptype == "url" or ptype_for_url == "url"):
-            benign.append("ML model not found (url_model.pkl missing) — rules-only mode.")
+        extracted_url = _extract_first_url_anywhere(payload)
 
-    # 5) Reserved domain cap (prevents example.com false alarms)
-    if is_reserved:
-        risk_score = min(risk_score, 15)
+    # 3) URL Rules + ML (only if we have a URL)
+    url_analysis = None
+    if extracted_url:
+        url = extracted_url.strip()
+        url_findings: list[str] = []
+        url_benign: list[str] = []
+        url_risk = 0
 
-    # 6) Clamp score
-    risk_score = max(0, min(100, int(risk_score)))
+        domain = _get_domain(url)
+        if not domain:
+            url_findings.append("URL parsing failed (domain not detected).")
+            url_risk += 25
+        else:
+            if _domain_in_set(domain, RESERVED_DOMAINS):
+                url_findings.append("URL points to reserved/local domain (test/localhost) - verify intent.")
+                url_risk += 10
 
-    meta = {
+            if _domain_in_set(domain, ALLOWLIST_DOMAINS):
+                url_benign.append("Domain is in allowlist (still verify path and parameters).")
+
+            if domain in SHORTENERS:
+                url_findings.append("URL shortener detected (hides final destination).")
+                url_risk += 25
+
+            if "xn--" in domain:
+                url_findings.append("Punycode domain detected (possible IDN homograph risk).")
+                url_risk += 20
+
+            if domain.count("-") >= 3:
+                url_findings.append("Many dashes in domain (often seen in phishing domains).")
+                url_risk += 10
+
+            if not _dns_resolves(domain) and not _domain_in_set(domain, RESERVED_DOMAINS):
+                url_findings.append("Domain does not resolve in DNS (suspicious or dead domain).")
+                url_risk += 15
+            else:
+                url_benign.append("Domain resolves in DNS.")
+
+        if _url_is_http(url):
+            url_findings.append("URL uses HTTP (not HTTPS) — vulnerable to MITM / downgrade.")
+            url_risk += 10
+        else:
+            url_benign.append("Uses HTTPS or non-HTTP scheme.")
+
+        if _looks_like_ip(url):
+            url_findings.append("IP address used in URL (common in phishing/malware).")
+            url_risk += 15
+
+        hits = _lure_hits(url)
+        if hits:
+            url_findings.append(f"Lure keywords detected in URL: {', '.join(hits)}")
+            url_risk += 10
+
+        # ML prediction (if model exists)
+        ml_result = None
+        if model_exists():
+            try:
+                ml_result = predict_url(url)
+                if ml_result.get("label") == "phishing":
+                    url_findings.append(
+                        f"ML flagged URL as phishing (p={ml_result.get('phishing_probability'):.3f}, "
+                        f"thr={ml_result.get('threshold'):.3f})."
+                    )
+                    url_risk += 35
+                else:
+                    url_benign.append(
+                        f"ML labeled URL as benign (p={ml_result.get('phishing_probability'):.3f})."
+                    )
+            except Exception as e:
+                url_findings.append(f"ML prediction failed: {e}")
+                url_risk += 10
+        else:
+            url_benign.append("ML model not found (url_model.pkl missing) — skipped ML check.")
+
+        url_risk = min(100, url_risk)
+        url_analysis = {
+            "url": url,
+            "domain": domain,
+            "risk_score": url_risk,
+            "findings": url_findings,
+            "benign": url_benign,
+            "ml": ml_result,
+        }
+
+        findings.extend([f"[URL] {x}" for x in url_findings])
+        benign.extend([f"[URL] {x}" for x in url_benign])
+        risk_score += min(40, url_risk // 2)  # merge into overall score nicely
+
+    risk_score = max(0, min(100, risk_score))
+    verdict = _verdict_band(risk_score)
+
+    result = {
         "report_id": report_id,
+        "payload": payload,
         "payload_type": ptype,
-        "domain": domain,
-        "dns_resolves": bool(dns_ok),
-        "allowlisted": bool(is_allowlisted),
-        "reserved_domain": bool(is_reserved),
-        "shortener": bool(is_shortener),
-        "verdict_band": _verdict_band(risk_score),
-    }
-
-    analysis = {
-        "payload": payload if ptype != "vcard" else payload,  # keep original
-        "meta": meta,
         "risk_score": risk_score,
+        "verdict": verdict,
         "findings": findings,
-        "benign_signals": benign,
-        "ml": ml_result,
+        "benign": benign,
+        "url_analysis": url_analysis,
     }
 
-    analysis["report_md"] = build_markdown_report(analysis)
-    return analysis
+    result["report_md"] = build_markdown_report(result)
+    return result

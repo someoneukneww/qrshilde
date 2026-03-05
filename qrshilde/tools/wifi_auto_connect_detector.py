@@ -1,5 +1,6 @@
 import re
 
+
 def detect_wifi_threats(payload: str):
     threats = []
 
@@ -17,7 +18,7 @@ def detect_wifi_threats(payload: str):
     if (encryption or "").upper() == "WEP":
         threats.append("Weak Encryption (WEP) - Easily Hacked.")
 
-    # ✅ Fix: case-insensitive check
+    # Case-insensitive check for hidden network flag
     if "h:true" in (payload or "").lower():
         threats.append("Hidden Network - Often used in 'Evil Twin' attacks.")
 

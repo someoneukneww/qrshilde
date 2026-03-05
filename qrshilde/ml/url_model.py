@@ -24,7 +24,7 @@ def predict_url(url: str) -> dict:
     model = _load_model()
     feats, names = extract_url_features(url)
 
-    # predict probability
+    # predict probability (class 1 = malicious/phishing)
     proba = model.predict_proba([feats])[0][1]
     p = float(proba)
 
@@ -32,8 +32,6 @@ def predict_url(url: str) -> dict:
     label = "phishing" if p >= threshold else "benign"
 
     # Explainability:
-    # - If linear model: coef * value
-    # - If tree/boosting: feature_importances_
     reasons = []
     try:
         if hasattr(model, "coef_"):

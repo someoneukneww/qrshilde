@@ -54,7 +54,7 @@ def extract_url_features(u: str):
 
     parsed = _safe_urlparse(u)
     if parsed:
-        # ✅ IMPORTANT: hostname avoids userinfo/port pollution (netloc can include ":8080" etc.)
+        # hostname avoids userinfo/port pollution (netloc can include ":8080" etc.)
         host = (parsed.hostname or "")
         path = parsed.path or ""
         if "." in host:

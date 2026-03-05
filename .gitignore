@@ -1,25 +1,57 @@
-# Virtual environment
+# =========================
+# Python / Virtual Env
+# =========================
 .venv/
-
-# Python cache
+venv/
+ENV/
+env/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Secrets / environment
+# =========================
+# Secrets / Environment
+# =========================
 .env
 .env.*
+!.env.example
 
-# Generated reports & artifacts
+# =========================
+# Reports / Artifacts
+# =========================
 history.json
 reports/
-static/uploads/
 demo_results.json
 
+# =========================
+# Uploads (keep folder, ignore content)
+# =========================
+static/uploads/*
+!static/uploads/.keep
+
+# =========================
 # ML models (generated after training)
+# =========================
+qrshilde/ml/url_model.pkl
+qrshilde/ml/url_model_meta.json
+
+# (old structure safety, لو بقيت آثار)
 qrshilde/src/ml/url_model.pkl
+qrshilde/src/ml/url_model_meta.json
+
+# =========================
 # Datasets (keep local)
+# =========================
 data/
 *.csv
+*.tsv
+*.jsonl
 
-# allow public env template
-!.env.example
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

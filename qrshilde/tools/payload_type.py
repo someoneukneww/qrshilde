@@ -1,5 +1,3 @@
-import re
-
 def detect_payload_type(payload: str) -> str:
     p = (payload or "").strip()
 
@@ -17,7 +15,7 @@ def detect_payload_type(payload: str) -> str:
     if p.lower().startswith("tel:"):
         return "tel"
 
-    if p.lower().startswith(("mailto:",)):
+    if p.lower().startswith("mailto:"):
         return "email"
 
     if up.startswith("MATMSG:"):
